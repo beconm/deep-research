@@ -12,13 +12,6 @@ load_dotenv()
 
 def _find_root() -> Path:
     """Locate the project root without assuming how deep this file is buried.
-
-    An earlier version used ``parents[2]``, which assumed a nested
-    ``<root>/src/drc/config.py`` layout. In this flat layout that walks two
-    levels too far -- past the repo, past your home directory -- and fails with
-    a PermissionError at import time. Search upward for a project marker
-    instead, and let the environment override it. This now works regardless of
-    how deep the file sits.
     """
     env = os.getenv("DRC_ROOT")
     if env:
@@ -45,10 +38,6 @@ CACHE = ROOT / ".cache"
 
 def ensure_dirs() -> None:
     """Create the output directories. Called before writing, never on import.
-
-    Importing a config module should not touch the filesystem: it makes the
-    package unimportable in any read-only or unexpected location, and turns a
-    storage problem into a mysterious import error.
     """
     for d in (DATA, RUNS, FIGS, CACHE):
         try:
