@@ -222,7 +222,6 @@ The confidence returned is raw agreement, not the isotonic- or Platt-fitted prob
 
 `Dockerfile` and `requirements-service.txt` package the service for deployment; `.github/workflows/deploy.yml` builds, tests, and deploys it to Cloud Run on push to `main`, separately from `.github/workflows/ci.yml`'s lighter test-only run on every push. Because `api.py` calls the real research pipeline rather than a stand-in, the deployed image needs the full dependency set from `requirements.txt` -- there is no smaller "just the API" install here, unlike a service that only wraps a single model call.
 
-`POSTMORTEM.md` documents two real failures hit while getting this pipeline running on free-tier keys -- a retired model and an exhausted quota -- each diagnosed with tools this project already has: `check.py`'s live test, a diversity probe, and the trace log. `test_known_errors.py` locks both error shapes in as a regression test, the same pattern `test_tiebreak.py` already uses for the tie-break finding.
 
 ## Layout
 
@@ -244,7 +243,6 @@ The confidence returned is raw agreement, not the isotonic- or Platt-fitted prob
 | `check.py` | environment check, including live API calls |
 | `api.py` | live HTTP endpoint wrapping the same researcher/aggregate functions |
 | `Dockerfile`, `requirements-service.txt` | container image for `api.py` |
-| `POSTMORTEM.md` | two real free-tier failures hit while getting this running |
 | `test_*.py` | numerical tests, no API calls (includes `test_resilience.py`, `test_known_errors.py`) |
 
 Setup and dependencies: [SETUP.md](SETUP.md).
