@@ -37,6 +37,8 @@ PY
 echo "-> running tests"
 python test_numerics.py | tail -1
 python test_tiebreak.py | tail -1
+python test_resilience.py | tail -1
+python test_known_errors.py | tail -1
 
 # --- dotfiles are generated here, not shipped -----------------------------
 # Downloading files individually silently drops leading-dot files, and a
@@ -82,6 +84,14 @@ RESEARCHER_MODEL=openai:gpt-4.1-mini
 GRADER_MODEL=openai:gpt-4.1
 N_MAX=8
 N_QUESTIONS=300
+
+# Optional: fallback researcher model, used only if the primary is fatally
+# unavailable mid-sweep. Needs its own key if you want it reachable.
+# FALLBACK_RESEARCHER_MODEL=google_genai:gemini-3.5-flash-lite
+
+# Optional: real tracing via Langfuse. Unset -> traces go to traces.jsonl.
+# LANGFUSE_PUBLIC_KEY=
+# LANGFUSE_SECRET_KEY=
 ENVEOF
   echo "-> wrote .env skeleton"
   echo

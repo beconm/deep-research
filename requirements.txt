@@ -13,6 +13,9 @@ langchain-groq>=0.3                # FREE tier: Llama on Groq
 langchain-openai>=1.0              # paid
 # langchain-ollama>=0.3            # fully local, uncomment if using Ollama
 
+# --- observability ---------------------------------------------------------
+# langfuse>=4.0                     # optional, real tracing; unset keys -> local traces.jsonl
+
 # --- search --------------------------------------------------------------
 ddgs>=9.0                          # FREE, keyless DuckDuckGo
 langchain-tavily>=0.2.17           # paid, better quality

@@ -21,6 +21,7 @@ from pathlib import Path
 
 from config import RUNS, ensure_dirs, settings
 from ensemble import normalise
+from tracing import get_tracer
 
 GRADER_TEMPLATE = """Judge whether the predicted answer matches the correct answer.
 
@@ -72,13 +73,17 @@ class Grader:
             self.cache[key] = False
             return False
 
-        resp = await self.model.ainvoke(
-            GRADER_TEMPLATE.format(question=question, correct_answer=correct,
-                                   predicted_answer=predicted)
-        )
-        text = resp.content if isinstance(resp.content, str) else str(resp.content)
-        verdict = bool(re.search(r"\bcorrect\b", text.strip(), re.I)) and not \
-            re.search(r"\bincorrect\b", text.strip(), re.I)
+        tracer = get_tracer()
+        with tracer.span("grader.grade", qid=qid, model=settings.grader_model) as span:
+            resp = await self.model.ainvoke(
+                GRADER_TEMPLATE.format(question=question, correct_answer=correct,
+                                       predicted_answer=predicted)
+            )
+            text = resp.content if isinstance(resp.content, str) else str(resp.content)
+            verdict = bool(re.search(r"\bcorrect\b", text.strip(), re.I)) and not \
+                re.search(r"\bincorrect\b", text.strip(), re.I)
+            span.update(verdict=verdict)
+
         self.cache[key] = verdict
         self.calls += 1
         return verdict

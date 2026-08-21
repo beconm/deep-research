@@ -65,7 +65,7 @@ def check_agent_factory() -> None:
 
 def check_project_modules() -> None:
     mods = ["config", "benchmark", "cache", "calibration", "ensemble",
-            "grader", "plots", "sweep", "researcher"]
+            "grader", "plots", "sweep", "researcher", "resilience", "tracing"]
     missing = []
     for m in mods:
         try:
@@ -121,6 +121,50 @@ def check_env() -> None:
     if os.getenv("LANGSMITH_API_KEY"):
         line(OK, "LANGSMITH_API_KEY", "set (optional)")
 
+    fb_model = config.settings.fallback_researcher_model
+    fb_key = keymap.get(config.provider(fb_model)) if fb_model else None
+    if fb_key and fb_key not in required:
+        if (os.getenv(fb_key) or "").strip():
+            line(OK, fb_key, "set (fallback researcher)")
+        else:
+            warnings_.append(
+                f"{fb_key} not set -- the fallback researcher model "
+                f"({fb_model}) is configured but unreachable. Not required; "
+                "the fallback is simply a no-op without it.")
+            line(WARN, fb_key, "not set (fallback unreachable)")
+
+    if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
+        line(OK, "LANGFUSE_*_KEY", "set (optional, real tracing active)")
+    else:
+        line(OK, "LANGFUSE_*_KEY", "not set (local traces.jsonl tracer active)")
+
+
+def _check_model_call(model_id: str, label: str) -> None:
+    """One live call against `model_id`, reported as `label`. Split out of
+    check_live_apis() so researcher_model and grader_model can be tested
+    independently -- they can have different availability even within the
+    same provider (a specific model retired for new users while a sibling
+    model on the same key works fine), so testing only one leaves a blind
+    spot that surfaces later, mid-pipeline, instead of here."""
+    import config
+    try:
+        from langchain.chat_models import init_chat_model
+        model = init_chat_model(model_id, temperature=0)
+        resp = model.invoke("Reply with the single word: ok")
+        text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        tag = "FREE" if config.is_free(model_id) else "paid"
+        line(OK, label, f"{model_id} [{tag}] -> {text.strip()[:16]!r}")
+    except Exception as exc:  # noqa: BLE001
+        name = type(exc).__name__
+        key = {"openai": "OPENAI_API_KEY", "google_genai": "GOOGLE_API_KEY",
+               "groq": "GROQ_API_KEY", "anthropic": "ANTHROPIC_API_KEY"
+               }.get(config.provider(model_id), "the provider key")
+        hint = (f"key invalid or expired -- check {key} in .env"
+                if "Auth" in name or "401" in str(exc) or "API key" in str(exc)
+                else str(exc)[:70])
+        failures.append(f"{label} failed ({name}): {hint}")
+        line(BAD, label, f"{name}: {hint[:44]}")
+
 
 def check_live_apis(skip: bool = False) -> None:
     """Actually call both APIs. This is the check that matters.
@@ -135,27 +179,14 @@ def check_live_apis(skip: bool = False) -> None:
         return
 
     import config
-    model_id = config.settings.researcher_model
-    backend = config.settings.search_backend
 
-    # --- model ------------------------------------------------------------
-    try:
-        from langchain.chat_models import init_chat_model
-        model = init_chat_model(model_id, temperature=0)
-        resp = model.invoke("Reply with the single word: ok")
-        text = resp.content if isinstance(resp.content, str) else str(resp.content)
-        tag = "FREE" if config.is_free(model_id) else "paid"
-        line(OK, "model call", f"{model_id} [{tag}] -> {text.strip()[:16]!r}")
-    except Exception as exc:  # noqa: BLE001
-        name = type(exc).__name__
-        key = {"openai": "OPENAI_API_KEY", "google_genai": "GOOGLE_API_KEY",
-               "groq": "GROQ_API_KEY", "anthropic": "ANTHROPIC_API_KEY"
-               }.get(config.provider(model_id), "the provider key")
-        hint = (f"key invalid or expired -- check {key} in .env"
-                if "Auth" in name or "401" in str(exc) or "API key" in str(exc)
-                else str(exc)[:70])
-        failures.append(f"model call failed ({name}): {hint}")
-        line(BAD, "model call", f"{name}: {hint[:44]}")
+    _check_model_call(config.settings.researcher_model, "researcher model call")
+    if config.settings.grader_model != config.settings.researcher_model:
+        _check_model_call(config.settings.grader_model, "grader model call")
+    else:
+        line(OK, "grader model call", "same model as researcher, already tested above")
+
+    backend = config.settings.search_backend
 
     # --- search -----------------------------------------------------------
     try:
@@ -217,7 +248,7 @@ def check_gitignore() -> None:
 
 
 def check_tests() -> None:
-    for t in ("test_numerics.py", "test_tiebreak.py"):
+    for t in ("test_numerics.py", "test_tiebreak.py", "test_resilience.py", "test_known_errors.py"):
         if not Path(t).exists():
             warnings_.append(f"{t} not found")
             line(WARN, t, "not found")

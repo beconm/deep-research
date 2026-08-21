@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 
 from cache import SearchCache
 from config import settings
+from resilience import try_with_fallback
+from tracing import get_tracer
 
 # Mirrors the official BrowseComp query template closely enough that the parsed
 # fields line up with the reference grader -- including the confidence field,
@@ -133,9 +135,28 @@ FATAL_ERRORS = (
     "MissingAPIKeyError", "UnauthorizedError",
 )
 
+# langchain_google_genai doesn't raise distinct exception classes per failure
+# type the way the FATAL_ERRORS above assume -- everything comes back as one
+# ChatGoogleGenerativeAIError, with the real reason as a gRPC-style status
+# code inside the message text (e.g. "(NOT_FOUND): 404 NOT_FOUND"). Same
+# fatality, different signal, so check the message too.
+FATAL_STATUS_MARKERS = (
+    # Google's gRPC-style status codes, embedded in ChatGoogleGenerativeAIError's
+    # message text rather than exposed as a distinct exception class.
+    "NOT_FOUND", "PERMISSION_DENIED", "UNAUTHENTICATED",
+    "INVALID_ARGUMENT", "FAILED_PRECONDITION",
+    # OpenAI-compatible providers (Groq included) report the same kind of
+    # unrecoverable failure as lowercase snake_case 'code' values instead.
+    "model_not_found", "invalid_api_key",
+)
+
 
 def is_fatal(err: str | None) -> bool:
-    return bool(err) and err.split(":")[0].strip() in FATAL_ERRORS
+    if not err:
+        return False
+    if err.split(":")[0].strip() in FATAL_ERRORS:
+        return True
+    return any(marker in err for marker in FATAL_STATUS_MARKERS)
 
 
 @dataclass
@@ -151,6 +172,11 @@ class ResearchRun:
     billable_searches: int = 0
     error: str | None = None
     raw: str = field(default="", repr=False)
+    # Which model actually produced this run: settings.researcher_model, or
+    # settings.fallback_researcher_model if the primary failed and the
+    # fallback took over (see resilience.try_with_fallback). Empty string
+    # means the run failed before either model returned anything usable.
+    model_used: str = ""
 
     @property
     def fatal(self) -> bool:
@@ -249,29 +275,47 @@ async def run_one(
     create_agent = _load_agent_factory()
     counters = {"search_calls": 0, "billable_searches": 0}
     tool = make_search_tool(cache, counters)
-
-    model = init_chat_model(
-        settings.researcher_model, temperature=settings.temperature
-    )
     prompt = "You are a meticulous research assistant. Search before answering."
     if settings.use_diversity_prompts:
         prompt += " " + DIVERSITY_HINTS[member % len(DIVERSITY_HINTS)]
 
-    agent = _build_agent(create_agent, model, [tool], prompt)
+    def _query():
+        return {"messages": [{"role": "user",
+                              "content": QUERY_TEMPLATE.format(problem=problem)}]}
 
-    try:
-        result = await _with_retry(
-            lambda: agent.ainvoke(
-                {"messages": [{"role": "user",
-                               "content": QUERY_TEMPLATE.format(problem=problem)}]}
-            ),
-            what="agent",
-        )
-    except Exception as exc:  # noqa: BLE001 - one bad run must not kill the sweep
-        return ResearchRun(qid, member, "", "", None,
-                           search_calls=counters["search_calls"],
-                           billable_searches=counters["billable_searches"],
-                           error=f"{type(exc).__name__}: {exc}")
+    async def _invoke_primary():
+        model = init_chat_model(settings.researcher_model, temperature=settings.temperature)
+        agent = _build_agent(create_agent, model, [tool], prompt)
+        return await _with_retry(lambda: agent.ainvoke(_query()), what="agent")
+
+    # Only built when a fallback is actually configured and differs from the
+    # primary -- with the default empty/matching case this is a no-op and
+    # run_one behaves exactly as before.
+    fallback_call = None
+    fb_name = settings.fallback_researcher_model
+    if fb_name and fb_name != settings.researcher_model:
+        async def _invoke_fallback():
+            fb_model = init_chat_model(fb_name, temperature=settings.temperature)
+            fb_agent = _build_agent(create_agent, fb_model, [tool], prompt)
+            return await _with_retry(lambda: fb_agent.ainvoke(_query()), what="agent-fallback")
+        fallback_call = _invoke_fallback
+
+    tracer = get_tracer()
+    with tracer.span("researcher.run_one", qid=qid, member=member,
+                     primary_model=settings.researcher_model) as span:
+        try:
+            result, outcome = await try_with_fallback(
+                _invoke_primary, fallback_call,
+                primary_name=settings.researcher_model, fallback_name=fb_name,
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad run must not kill the sweep
+            span.update(success=False, error=f"{type(exc).__name__}: {exc}")
+            return ResearchRun(qid, member, "", "", None,
+                               search_calls=counters["search_calls"],
+                               billable_searches=counters["billable_searches"],
+                               error=f"{type(exc).__name__}: {exc}")
+        span.update(success=True, model_used=outcome.model_used,
+                    used_fallback=outcome.used_fallback)
 
     messages = result["messages"]
     text = messages[-1].content
@@ -290,6 +334,7 @@ async def run_one(
         stated_confidence=conf, input_tokens=inp, output_tokens=out,
         search_calls=counters["search_calls"],
         billable_searches=counters["billable_searches"], raw=text,
+        model_used=outcome.model_used,
     )
 
 

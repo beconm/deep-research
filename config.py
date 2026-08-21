@@ -63,9 +63,31 @@ SIMPLEQA_URL = (
 # per day, not dollars, so see FREE_TIER_RPD below.
 PRICING: dict[str, tuple[float, float]] = {
     # --- free tiers ------------------------------------------------------
+    # gemini-2.5-flash: likely blocked for new API keys as well, following
+    # the same generation-wide pattern as gemini-2.5-flash-lite below --
+    # not independently verified the way -lite was.
     "google_genai:gemini-2.5-flash": (0.0, 0.0),
+    "google_genai:gemini-3.5-flash": (0.0, 0.0),
+    # gemini-2.5-flash-lite: retired for new API keys as of Aug 2026.
+    # Google's own error response names the replacement below. Left here
+    # rather than deleted, since existing runs/results.json files may
+    # still reference this key.
     "google_genai:gemini-2.5-flash-lite": (0.0, 0.0),
+    # gemini-3.5-flash-lite: available, but as of this model generation
+    # Google ignores temperature/top_p/top_k entirely, confirmed both by
+    # Google's own migration documentation and by a UserWarning raised at
+    # call time. Used as the fallback (see fallback_researcher_model
+    # below) rather than the researcher default, since the ensemble's
+    # confidence signal depends on temperature-driven sampling diversity
+    # this model cannot provide.
+    "google_genai:gemini-3.5-flash-lite": (0.0, 0.0),
+    # llama-3.3-70b-versatile: deprecated by Groq on 2026-06-17. Groq's own
+    # migration guidance names openai/gpt-oss-120b as the replacement.
     "groq:llama-3.3-70b-versatile": (0.0, 0.0),
+    # Standard open-weight inference -- no known sampling-parameter
+    # restriction. Free-tier status not independently verified; confirm
+    # before relying on it at volume.
+    "groq:openai/gpt-oss-120b": (0.0, 0.0),
     "groq:llama-3.1-8b-instant": (0.0, 0.0),
     "ollama:llama3.1": (0.0, 0.0),          # fully local, no quota at all
     # --- paid ------------------------------------------------------------
@@ -98,10 +120,31 @@ class Settings:
     benchmark: str = os.getenv("BENCHMARK", "simpleqa")
 
     # --- models -------------------------------------------------------------
+    # Groq over Gemini: gemini-2.5-flash-lite is retired for new API keys,
+    # and gemini-3.5-flash-lite (its direct replacement) ignores
+    # temperature, top_p, and top_k entirely as of this model generation --
+    # a deliberate change, confirmed by a live API call rather than
+    # documentation alone -- which removes the sampling diversity the
+    # ensemble's confidence signal depends on. Groq's open-weight models
+    # carry no equivalent restriction.
+    #
+    # Trade-off worth knowing before scaling up: Groq's free tier is a
+    # per-day TOKEN budget rather than a per-day request count, and
+    # BrowseComp-style questions are token-heavy (tens of thousands of
+    # tokens per member is common), so a full sweep at that difficulty can
+    # exhaust a day's budget within a handful of questions. SimpleQA (the
+    # benchmark default above) is far lighter per question and pairs
+    # better with this researcher/fallback combination at scale; size
+    # N_QUESTIONS and N_MAX accordingly if staying on BrowseComp.
     researcher_model: str = os.getenv("RESEARCHER_MODEL",
-                                      "google_genai:gemini-2.5-flash-lite")
+                                      "groq:openai/gpt-oss-120b")
+    # Same generation as the retired researcher default above; switched
+    # proactively rather than waiting to hit the identical error during
+    # grading. Grading doesn't need sampling diversity, so the temperature
+    # restriction that rules this model out for researcher_model doesn't
+    # apply here.
     grader_model: str = os.getenv("GRADER_MODEL",
-                                  "google_genai:gemini-2.5-flash")
+                                  "google_genai:gemini-3.5-flash")
 
     # --- search -------------------------------------------------------------
     # "duckduckgo" keyless and free, lower quality, rate-limited
@@ -112,6 +155,29 @@ class Settings:
     # top reliability bin and calibration becomes unmeasurable. 45-65% is the
     # best-conditioned regime for this experiment -- and the cheapest.
     temperature: float = 1.0
+
+    # --- resilience -----------------------------------------------------------
+    # A second free-tier model on a DIFFERENT provider from researcher_model,
+    # so a quota exhaustion or outage on one provider doesn't also take out
+    # the fallback. Only invoked when a member's primary call fails fatally
+    # (see researcher.is_fatal) or exhausts _with_retry's retries -- not for
+    # ordinary rate-limit backoff, which _with_retry already absorbs. Empty
+    # string disables the fallback path entirely.
+    #
+    # Gemini as fallback rather than researcher: its temperature
+    # restriction matters far less on an occasional fallback call than as
+    # the primary source of ensemble diversity.
+    #
+    # Needs its own key if exercised -- e.g. GOOGLE_API_KEY for the default.
+    # Note this model's tokens are still priced at researcher_model's rate
+    # in 04_analyse.py (PRICING.get(settings.researcher_model, ...)), so if
+    # the fallback is exercised at volume the USD figures understate cost
+    # by the difference between the two models' pricing -- not an issue
+    # while both are free-tier, but worth fixing before pricing a paid
+    # fallback.
+    fallback_researcher_model: str = os.getenv(
+        "FALLBACK_RESEARCHER_MODEL", "google_genai:gemini-3.5-flash-lite"
+    )
 
     # --- ensemble -----------------------------------------------------------
     n_max: int = int(os.getenv("N_MAX", 5))  # runs actually executed per question

@@ -200,6 +200,30 @@ tokens, and failed records can be pruned so a re-run actually re-runs.
 
 ---
 
+## Resilience and tracing
+
+Two additions on top of the pipeline described above, neither of which changes a result -- both are about not silently losing one.
+
+**A second free-tier model as fallback.** `_with_retry` already absorbs ordinary rate-limit backoff. What it cannot fix is the primary model becoming genuinely unavailable mid-sweep -- an exhausted quota, a provider outage, a deprecated model ID. `resilience.try_with_fallback` tries `fallback_researcher_model` (a different provider by default, so one outage doesn't take out both) once before a member's run is recorded as failed. Off by default in effect: point it at the same model as `researcher_model`, or leave its key unset, and `run_one` behaves exactly as before. `ResearchRun.model_used` records which model actually answered.
+
+**Groq as researcher, Gemini as fallback.** Gemini's newest Flash-Lite generation ignores `temperature`, `top_p`, and `top_k` entirely -- a deliberate change on Google's part, confirmed via a live API call rather than documentation alone -- which removes the sampling diversity the ensemble's confidence signal depends on. Groq's open-weight models carry no equivalent restriction, which is why they are the researcher default here rather than the fallback. The trade-off: Groq's free tier is a per-day token budget rather than a per-day request count, and BrowseComp-style questions are token-heavy enough that a full sweep can exhaust a day's budget within a handful of questions -- worth sizing `N_QUESTIONS` and `N_MAX` against that, or against SimpleQA's far lighter per-question cost, before committing to a long run. See `POSTMORTEM.md` for the incident that surfaced both of these.
+
+**Every model and grader call is traced.** `tracing.get_tracer()` writes structured spans -- which model, latency, success, the exact error on failure -- to `traces.jsonl` by default, or to Langfuse if `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` are set. On a free tier with an opaque per-minute or per-day cap, this is the difference between "the sweep is slow" and knowing exactly which provider is throttling and how often the fallback had to cover for it.
+
+**One thing this does not fix.** `04_analyse.py` prices every token at `PRICING[settings.researcher_model]`. If the fallback is exercised at volume, its tokens are still priced at the primary's rate -- invisible while both are free-tier `(0.0, 0.0)`, but wrong the moment either model is paid.
+
+## A live endpoint on top of the batch pipeline
+
+Everything above runs as an offline sweep against a fixed benchmark. `api.py` wraps the same `researcher.run_one()` and `ensemble.aggregate()` used by `02_run_ensemble.py` and `04_analyse.py` behind a single HTTP endpoint, so the calibrated confidence signal this project measures can also answer one live question instead of three hundred benchmark ones.
+
+`POST /research` streams each ensemble member's answer as it completes (Server-Sent Events, not raw token streaming -- an ensemble's natural unit of progress is "one member finished," not "one token generated"), then a final event with the aggregated answer and its agreement score. A request here does not touch `runs/ensemble_runs.jsonl` or the grading path; it shares only the search cache with the batch pipeline, so overlapping queries benefit from cached results without mixing live traffic into benchmark data.
+
+The confidence returned is raw agreement, not the isotonic- or Platt-fitted probability `04_analyse.py` reports -- a completed run's fitted calibrator is not currently persisted to disk, only its metrics. Saving that mapping and loading it here to convert raw agreement into a properly calibrated probability is a natural next step and is not yet built.
+
+`Dockerfile` and `requirements-service.txt` package the service for deployment; `.github/workflows/deploy.yml` builds, tests, and deploys it to Cloud Run on push to `main`, separately from `.github/workflows/ci.yml`'s lighter test-only run on every push. Because `api.py` calls the real research pipeline rather than a stand-in, the deployed image needs the full dependency set from `requirements.txt` -- there is no smaller "just the API" install here, unlike a service that only wraps a single model call.
+
+`POSTMORTEM.md` documents two real failures hit while getting this pipeline running on free-tier keys -- a retired model and an exhausted quota -- each diagnosed with tools this project already has: `check.py`'s live test, a diversity probe, and the trace log. `test_known_errors.py` locks both error shapes in as a regression test, the same pattern `test_tiebreak.py` already uses for the tie-break finding.
+
 ## Layout
 
 | File | Role |
@@ -208,6 +232,8 @@ tokens, and failed records can be pruned so a re-run actually re-runs.
 | `config.py` | every dial: models, benchmark, search backend, pricing |
 | `benchmark.py` | dataset download, decryption, frozen calibration/test split |
 | `researcher.py` | one research run; the only LangChain-facing module |
+| `resilience.py` | retry-then-fallback for a single model call, framework-free |
+| `tracing.py` | per-call tracing -- Langfuse if configured, local JSONL otherwise |
 | `ensemble.py` | answer normalisation, clustering, agreement, tie-break policy |
 | `grader.py` | verdicts against the reference answer, cached per distinct answer |
 | `calibration.py` | ECE, Brier, Murphy decomposition, isotonic/Platt, bootstrap, permutation test |
@@ -216,7 +242,10 @@ tokens, and failed records can be pruned so a re-run actually re-runs.
 | `cache.py` | disk-backed search cache |
 | `fixtures.py` | test fixtures only — never imported by the pipeline |
 | `check.py` | environment check, including live API calls |
-| `test_*.py` | numerical tests, no API calls |
+| `api.py` | live HTTP endpoint wrapping the same researcher/aggregate functions |
+| `Dockerfile`, `requirements-service.txt` | container image for `api.py` |
+| `POSTMORTEM.md` | two real free-tier failures hit while getting this running |
+| `test_*.py` | numerical tests, no API calls (includes `test_resilience.py`, `test_known_errors.py`) |
 
 Setup and dependencies: [SETUP.md](SETUP.md).
 
